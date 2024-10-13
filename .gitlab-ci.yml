@@ -1,0 +1,79 @@
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH == "dev"
+      variables:
+          STAGE: "dev"
+          AWS_ACCESS_KEY_ID: $DEV_AWS_ACCESS_KEY_ID
+          AWS_SECRET_ACCESS_KEY: $DEV_AWS_SECRET_ACCESS_KEY
+          AWS_DEFAULT_REGION: $DEV_AWS_DEFAULT_REGION
+          BUCKET_NAME: $DEV_ARTIFACT_BUCKET_NAME
+
+    - if: $CI_COMMIT_BRANCH == "main"
+      variables:
+        STAGE: "prod"
+        AWS_ACCESS_KEY_ID: $PROD_AWS_ACCESS_KEY_ID
+        AWS_SECRET_ACCESS_KEY: $PROD_AWS_SECRET_ACCESS_KEY
+        AWS_DEFAULT_REGION: $PROD_AWS_DEFAULT_REGION
+        BUCKET_NAME: $PROD_ARTIFACT_BUCKET_NAME
+
+    - if: $CI_COMMIT_BRANCH == "release"
+      variables:
+        STAGE: "release"
+        AWS_ACCESS_KEY_ID: $RELEASE_AWS_ACCESS_KEY_ID
+        AWS_SECRET_ACCESS_KEY: $RELEASE_AWS_SECRET_ACCESS_KEY
+        AWS_DEFAULT_REGION: $RELEASE_AWS_DEFAULT_REGION
+        BUCKET_NAME: $RELEASE_ARTIFACT_BUCKET_NAME
+
+stages:
+  - deploy_to_s3
+  - terraform_deploy
+
+deploy_to_s3:
+    image: python:latest
+    stage: deploy_to_s3
+    script:
+            - echo "Starting the deploy_to_s3 job..."
+            - apt-get update
+            - apt-get install -y zip unzip
+            - pip install awscli
+            - echo "Installed aws cli on runner..."
+            - aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+            - aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+            - aws configure set region $AWS_DEFAULT_REGION
+            - mkdir -p fetch_replication_list/src && cp -r src/utils fetch_replication_list/src && touch src/utils fetch_replication_list/src/__init__.py && cp src/lambda/fetch_replication_list/lambda_function.py fetch_replication_list && cd fetch_replication_list && zip -r ../lambda_fetch_replication_list.zip * && cd ..
+            - mkdir -p count_notifier_lambda/src && cp -r src/utils count_notifier_lambda/src && touch src/utils count_notifier_lambda/src/__init__.py && cp src/lambda/count_notifier_lambda/lambda_function.py count_notifier_lambda && cd count_notifier_lambda && zip -r ../count_notifier_lambda.zip * && cd ..
+            - mkdir -p source_to_snowflake_sync/src && cp -r src/utils source_to_snowflake_sync/src && touch src/utils source_to_snowflake_sync/src/__init__.py && cp src/lambda/source_to_snowflake_sync/lambda_function.py source_to_snowflake_sync && cd source_to_snowflake_sync && zip -r ../source_to_snowflake_sync.zip * && cd ..
+            # - mkdir src/lambda/fetch_replication_list/src && cp -r src/utils src/lambda/fetch_replication_list/src && zip -r lambda_fetch_replication_list.zip src/lambda/fetch_replication_list/*
+            - mkdir -p postgres_to_snowflake_sync/src && cp -r src/utils postgres_to_snowflake_sync/src && touch postgres_to_snowflake_sync/src/__init__.py && cd postgres_to_snowflake_sync && zip -r ../postgres_to_snowflake_sync.zip * && cd ..
+#            - mkdir src/glue/postgres_to_snowflake_sync/src && cp -r src/utils src/glue/postgres_to_snowflake_sync/src && touch src/utils fetch_replication_list/src/__init__.py && zip -r glue_postgres_to_snowflake_sync.zip src/glue/postgres_to_snowflake_sync/*
+            #- mkdir src/glue/s3_to_snowflake_sync/src && cp -r src/utils src/glue/s3_to_snowflake_sync/src && touch src/utils fetch_replication_list/src/__init__.py && zip -r glue_s3_to_snowflake_sync.zip src/glue/s3_to_snowflake_sync/*
+            - mkdir -p s3_to_snowflake_sync/src && cp -r src/utils s3_to_snowflake_sync/src && touch s3_to_snowflake_sync/src/__init__.py && cd s3_to_snowflake_sync && zip -r ../s3_to_snowflake_sync.zip * && cd ..
+            - ls
+            - aws s3 sync . s3://$BUCKET_NAME/$STAGE/
+            - echo "Completed the deploy_to_s3 job."
+    only:
+      variables:
+        - $CI_COMMIT_BRANCH == "dev" || $CI_COMMIT_BRANCH == "release" || $CI_COMMIT_BRANCH == "main"
+
+terraform_deploy:
+  image:
+    name: hashicorp/terraform:light
+    entrypoint:
+      - '/usr/bin/env'
+      - 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+  stage: terraform_deploy
+  script:
+    - echo $STAGE
+    - cd terraform
+    - rm -rf .terraform
+    - terraform init  -backend-config=./backend/$STAGE-backend.conf
+    - terraform workspace select $STAGE || terraform workspace new $STAGE
+    - terraform init
+    # Uncomment the following line if you want to run terraform destroy
+    # - terraform destroy -var-file=./tfvars/$CI_COMMIT_BRANCH.tfvars -auto-approve
+    # Run your Terraform apply as before
+    - echo $STAGE
+    - terraform apply -var-file=./tfvars/$STAGE.tfvars -auto-approve
+  only:
+    variables:
+      - $CI_COMMIT_BRANCH == "dev" || $CI_COMMIT_BRANCH == "release" || $CI_COMMIT_BRANCH == "main"
